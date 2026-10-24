@@ -494,15 +494,18 @@ export function readTranscriptEventAtSeqInTransaction(
     : undefined;
 }
 
+type TranscriptEventReadOptions = {
+  beforeEventSeq?: number;
+  afterEventSeq?: number;
+  projection?: "reset-boundary";
+  maxEventBytes?: number;
+};
+
 /** Select the same fenced rows for synchronous materialization and worker transfer. */
 export function prepareTranscriptEventReadQuery(
   database: Pick<OpenClawAgentDatabase, "db">,
   sessionId: string,
-  options: {
-    beforeEventSeq?: number;
-    afterEventSeq?: number;
-    maxEventBytes?: number;
-  } = {},
+  options: Omit<TranscriptEventReadOptions, "projection"> = {},
 ) {
   assertTranscriptEventReadBudget(database, sessionId, options);
   return getSessionKysely(database.db)
@@ -519,29 +522,37 @@ export function prepareTranscriptEventReadQuery(
 export function loadTranscriptEventsFromDatabase(
   database: Pick<OpenClawAgentDatabase, "db">,
   sessionId: string,
-  options: {
-    beforeEventSeq?: number;
-    afterEventSeq?: number;
-    projection?: "reset-boundary";
-    maxEventBytes?: number;
-  } = {},
+  options: TranscriptEventReadOptions = {},
 ): TranscriptEvent[] {
+  return readTranscriptEventsFromDatabase(database, sessionId, Array.from, options);
+}
+
+export function readTranscriptEventsFromDatabase<T>(
+  database: Pick<OpenClawAgentDatabase, "db">,
+  sessionId: string,
+  read: (events: Iterable<TranscriptEvent>) => T,
+  options: TranscriptEventReadOptions = {},
+): T {
   return readHotSessionTranscriptSnapshot(database, sessionId, "events", () => {
-    const rows = iterateSqliteQuerySync(
-      database.db,
-      prepareTranscriptEventReadQuery(database, sessionId, options)
-        .select([
-          options.projection === "reset-boundary"
-            ? transcriptEventResetNavigationSql(database.db).as("event_json")
-            : transcriptEventJsonSql(database.db).as("event_json"),
-        ])
-        .orderBy("seq", "asc"),
-    );
-    // Array.from closes the iterator on parse failure; no live cursor escapes a fenced read.
-    return Array.from(rows, (row) => {
-      const event: TranscriptEvent = JSON.parse(row.event_json);
-      return event;
-    });
+    const query = prepareTranscriptEventReadQuery(database, sessionId, options)
+      .select([
+        options.projection === "reset-boundary"
+          ? transcriptEventResetNavigationSql(database.db).as("event_json")
+          : transcriptEventJsonSql(database.db).as("event_json"),
+      ])
+      .orderBy("seq", "asc");
+    const rows = iterateSqliteQuerySync(database.db, query);
+    // Consume inside the hot snapshot; early exit and failures close the native cursor.
+    const events = (function* () {
+      for (const row of rows) {
+        yield JSON.parse(row.event_json) as TranscriptEvent;
+      }
+    })();
+    try {
+      return read(events);
+    } finally {
+      events.return();
+    }
   });
 }
 

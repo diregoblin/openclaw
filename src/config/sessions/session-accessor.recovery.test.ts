@@ -18,6 +18,7 @@ import { runInDetachedAsyncContext } from "../../shared/detached-async-context.j
 import {
   closeOpenClawAgentDatabaseByPathAsync as closeDatabase,
   resolveOpenClawAgentSqlitePath as resolvePath,
+  runOpenClawAgentWriteTransaction,
 } from "../../state/openclaw-agent-db.js";
 import * as agentExecution from "../../state/openclaw-agent-execution.js";
 import { useSessionStoreTempDirs } from "../../test-utils/session-state-cleanup.js";
@@ -30,9 +31,17 @@ import {
 } from "./session-accessor.js";
 import { readSessionTranscriptMessageEventPage as readPage } from "./session-accessor.sqlite-active-events.js";
 import { readPreparedSessionEntryChange as readPublication } from "./session-accessor.sqlite-entry-cache-publication.js";
+import {
+  readTranscriptEventAtSeqSync,
+  readTranscriptStatsSync,
+} from "./session-accessor.sqlite-read.js";
 import { resolveSqliteReadScope, toDatabaseOptions } from "./session-accessor.sqlite-scope.js";
 import { replaceTranscriptEvents } from "./session-accessor.sqlite-transcript-write.test-support.js";
 import { waitForSessionTranscriptIndexReconcilesInStateDir as reconcile } from "./session-transcript-reconcile.js";
+import {
+  createTranscriptEventInserter,
+  prepareTranscriptPayloadForReuse,
+} from "./transcript-payload.js";
 import type { InternalSessionEntry } from "./types.js";
 
 const sessionDirs = useSessionStoreTempDirs(afterAll, "openclaw-session-recovery-");
@@ -198,6 +207,91 @@ describe("recoverSessionEntryFromRestartTombstone", () => {
         }),
       ).resolves.toEqual({ status: "conflict", reason: "source-changed" });
     }
+  });
+
+  it("rolls back a partially streamed clone after a source parse failure and can retry", async () => {
+    const fixture = await createFixture();
+    const sourceScope = { ...fixture.scope(), sessionId: "source-session" };
+    const sourceEvents = await readEvents(sourceScope);
+    await reconcile(fixture.root);
+    runOpenClawAgentWriteTransaction(
+      (database) => {
+        createTranscriptEventInserter(
+          database.db,
+          sourceScope.sessionId,
+        )({
+          seq: sourceEvents.length,
+          eventJson: "{",
+          createdAt: 10,
+        });
+      },
+      toDatabaseOptions(resolveSqliteReadScope(sourceScope)),
+    );
+
+    await expect(recover(fixture.recoveryParams())).rejects.toThrow(/JSON/);
+    expect(readEntry(fixture.scope())).toMatchObject({
+      pinnedAt: 5,
+      mainRestartRecovery: { revision: 4 },
+    });
+    expect(readEntry(fixture.scope())?.archivedAt).toBeUndefined();
+    expect(readEntry(fixture.scope(fixture.successorKey))).toBeUndefined();
+    expect(
+      readTranscriptStatsSync({
+        ...fixture.scope(fixture.successorKey),
+        sessionId: "successor-session",
+      }).eventCount,
+    ).toBe(0);
+
+    await replaceTranscriptEvents(sourceScope, sourceEvents);
+    await expect(recover(fixture.recoveryParams())).resolves.toMatchObject({ status: "created" });
+  });
+
+  it("recovers compressed history larger than the SQLite worker heap without truncation", async () => {
+    const fixture = await createFixture();
+    const sourceScope = { ...fixture.scope(), sessionId: "source-session" };
+    const payload = "synthetic recovery payload ".repeat(42_000);
+    const bodyCount = 600;
+    await replaceTranscriptEvents(sourceScope, [
+      { type: "session", version: 3, id: sourceScope.sessionId, cwd: fixture.root },
+    ]);
+    runOpenClawAgentWriteTransaction(
+      (database) => {
+        const event = {
+          type: "custom",
+          customType: "recovery-fixture",
+          payload,
+        };
+        const eventJson = JSON.stringify(event);
+        // Compress the fixture once; recovery must still decode each independent stored row.
+        const preparedPayload = prepareTranscriptPayloadForReuse(database.db, eventJson, event);
+        const insert = createTranscriptEventInserter(database.db, sourceScope.sessionId);
+        for (let seq = 1; seq <= bodyCount; seq++) {
+          insert({ seq, eventJson, preparedPayload, createdAt: seq });
+        }
+      },
+      toDatabaseOptions(resolveSqliteReadScope(sourceScope)),
+    );
+    await reconcile(fixture.root);
+    expect(readTranscriptStatsSync(sourceScope).sizeBytes).toBeGreaterThan(512 * 1024 * 1024);
+
+    await expect(recover(fixture.recoveryParams())).resolves.toMatchObject({ status: "created" });
+    const successorScope = {
+      ...fixture.scope(fixture.successorKey),
+      sessionId: "successor-session",
+    };
+    expect(readTranscriptStatsSync(successorScope).eventCount).toBe(bodyCount + 1);
+    expect(readTranscriptEventAtSeqSync(successorScope, bodyCount)?.event).toMatchObject({
+      customType: "recovery-fixture",
+      payload,
+    });
+    expect(readEntry(fixture.scope())).toMatchObject({
+      mainRestartRecovery: {
+        tombstone: {
+          recoveredSessionId: successorScope.sessionId,
+          recoveredSessionKey: fixture.successorKey,
+        },
+      },
+    });
   });
 
   it.each([
