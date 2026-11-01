@@ -1,4 +1,4 @@
-import { lazy, Loading, Errored } from "solid-js";
+import { lazy, Loading, Errored, onSettled } from "solid-js";
 import { registerCronEnglish } from "../../i18n/locales/en-cron.ts";
 import { registerEnglishCatalog, t } from "../../lib/reactive/i18n.ts";
 import { ListView } from "./view-list.tsx";
@@ -25,8 +25,8 @@ export function CronView(props: CronProps) {
     get target() {
       return (
         pending?.candidates.find(
-          (id) => id === "back" || props.jobs.some((job) => job.id === id),
-        ) ?? (pending ? "search" : undefined)
+          (id) => id === "back" || id === "create" || props.jobs.some((job) => job.id === id),
+        ) ?? (pending ? (props.listTab === "activity" ? "create" : "search") : undefined)
       );
     },
     remember(id, rows) {
@@ -34,25 +34,29 @@ export function CronView(props: CronProps) {
       order = rows;
       prepareFocus(["back"]);
     },
-    mount(id, element) {
-      if (!pending || id !== focus.target) {
-        return;
-      }
-      const request = pending;
-      pending = undefined;
-      const active = document.activeElement;
-      // Only replace the focus lost with this panel, never a newer user destination.
-      if (
-        props.gateway?.snapshot.hello === request.hello &&
-        (active === document.body || active === request.active)
-      ) {
-        element.focus();
-        element.scrollIntoView({ block: "nearest" });
-      }
+    ref(id) {
+      let element!: HTMLElement;
+      onSettled(() => {
+        if (!pending || id !== focus.target) {
+          return;
+        }
+        const request = pending;
+        pending = undefined;
+        const active = document.activeElement;
+        // Only replace the focus lost with this panel, never a newer user destination.
+        if (
+          props.gateway?.snapshot.hello === request.hello &&
+          (active === document.body || active === request.active)
+        ) {
+          element.focus();
+          element.scrollIntoView({ block: "nearest" });
+        }
+      });
+      return (node) => (element = node);
     },
   };
   const close = () => {
-    prepareFocus(origin ? [origin, ...order] : []);
+    prepareFocus(props.listTab === "activity" ? ["create"] : origin ? [origin, ...order] : []);
     props.onClosePanel();
   };
   const remove: CronProps["onRemove"] = async (job) => {

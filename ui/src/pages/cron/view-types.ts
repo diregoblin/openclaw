@@ -20,7 +20,7 @@ export type CronProps = Omit<CronViewProps, OptionalViewProp | "gateway"> &
     focus?: {
       readonly target: string | undefined;
       remember: (id: string, order: string[]) => void;
-      mount: (id: string, element: HTMLElement) => void;
+      ref: (id: string) => (element: HTMLElement) => void;
     };
   };
 

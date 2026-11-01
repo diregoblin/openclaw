@@ -215,8 +215,6 @@ function Toolbar(
     hasAdvancedJobsFilters: boolean;
   },
 ) {
-  let search!: HTMLInputElement;
-  onSettled(() => props.focus?.mount("search", search));
   return (
     <div class="cron-toolbar">
       {props.listTab === "tasks" ? (
@@ -226,7 +224,7 @@ function Toolbar(
               <Icon name="search" />
             </span>
             <input
-              ref={(element) => (search = element)}
+              ref={props.focus?.ref("search")}
               type="search"
               class="settings-input"
               value={props.jobsQuery}
@@ -260,6 +258,7 @@ function Toolbar(
           </button>
           {(props.canCreate ?? props.canManage) ? (
             <button
+              ref={props.focus?.ref("create")}
               type="button"
               class="btn primary btn--sm cron-new-task"
               data-test-id="cron-new-task"
@@ -542,8 +541,6 @@ function JobRow(
       style?: JSX.CSSProperties;
     },
 ) {
-  let button!: HTMLButtonElement;
-  onSettled(() => props.focus?.mount(props.job.id, button));
   const displayName = () => props.job.displayName ?? props.job.name;
   const description = () => props.job.description?.trim();
   return (
@@ -564,7 +561,7 @@ function JobRow(
         }
       }}
     >
-      <button ref={(element) => (button = element)} type="button" class="cron-table__name">
+      <button ref={props.focus?.ref(props.job.id)} type="button" class="cron-table__name">
         <JobStateIndicator job={props.job} />
         <span class="cron-table__name-copy">
           <span class="cron-table__name-line">

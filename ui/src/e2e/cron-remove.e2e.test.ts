@@ -15,11 +15,7 @@ const suite = createControlUiE2eSuite({
   unavailableMessage: (executablePath) =>
     `Playwright Chromium is not installed or cannot start at ${executablePath}.`,
 });
-const job = cronJob("nightly-digest", "Nightly digest", {
-  sessionTarget: "isolated",
-  wakeMode: "now",
-  payload: { kind: "agentTurn", message: "Summarize the overnight activity" },
-});
+const job = cronJob("nightly-digest", "Nightly digest");
 const cronListResponse = (jobs: (typeof job)[]) =>
   cronListResponseFixture(
     cronList(jobs, jobs.length ? "cron-remove-present" : "cron-remove-empty"),
@@ -93,6 +89,11 @@ suite.define(() => {
       await expect.poll(() => row.count()).toBe(0);
       const search = page.locator('.cron-search-box input[type="search"]');
       expect(await search.evaluate((el) => el === document.activeElement)).toBe(true);
+      await page.getByRole("tab", { name: "Run history", exact: true }).press("Enter");
+      const create = page.locator(".cron-new-task");
+      await create.press("Enter");
+      await back.press("Enter");
+      expect(await create.evaluate((el) => el === document.activeElement)).toBe(true);
     });
   });
 });
