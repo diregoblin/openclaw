@@ -1,4 +1,3 @@
-import type { DatabaseSync } from "node:sqlite";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
 import { sql } from "kysely";
 import {
@@ -6,6 +5,7 @@ import {
   getNodeSqliteKysely,
   prepareSqliteQuerySync,
 } from "../../infra/kysely-sync.js";
+import { isPostgresSqlConnection, type EngineConnection } from "../../infra/sql-connection.js";
 import { parseSqliteTableDefinition } from "../../infra/sqlite-schema-contract-assembly.js";
 import {
   getAdmittedSqliteSchemaFacts,
@@ -14,16 +14,12 @@ import {
 } from "../../infra/sqlite-schema-facts.js";
 import { SESSION_OWNER_COLUMN_DEFINITIONS } from "../../state/openclaw-agent-db-additive-columns.js";
 import type { DB as OpenClawAgentKyselyDatabase } from "../../state/openclaw-agent-db.generated.js";
+import { readTableColumns } from "../../state/openclaw-state-db-schema-helpers.js";
 import type { SessionActor } from "./session-entry-provenance.js";
+import type { SqliteSessionOwnerRow } from "./session-entry-storage.types.js";
 import type { SessionEntry } from "./types.js";
 
-export type SqliteSessionOwnerRow = {
-  owner_actor_type?: string | null;
-  owner_actor_id?: string | null;
-  owner_assigned_by_type?: string | null;
-  owner_assigned_by_id?: string | null;
-  owner_assigned_at?: number | null;
-};
+export type { SqliteSessionOwnerRow } from "./session-entry-storage.types.js";
 
 const ownerColumnAvailability = new WeakMap<SqliteSchemaFacts, boolean>();
 const rawOwnerColumnRead = createSqliteQueryCache((database) =>
@@ -65,7 +61,11 @@ export function projectSqliteSessionOwner(
   return owner ? { ...entry, owner } : entry;
 }
 
-export function hasSqliteSessionOwnerColumns(database: DatabaseSync): boolean {
+export function hasSqliteSessionOwnerColumns(database: EngineConnection): boolean {
+  if (isPostgresSqlConnection(database)) {
+    const columns = readTableColumns(database, "session_nodes");
+    return SESSION_OWNER_COLUMN_DEFINITIONS.every(({ columnName }) => columns.has(columnName));
+  }
   return runSqliteReadOperationSync(database, () => {
     const schema = getAdmittedSqliteSchemaFacts(database);
     if (schema) {

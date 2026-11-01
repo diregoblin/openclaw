@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { toErrorObject } from "@openclaw/normalization-core/error-coercion";
-import { loadSessionEntryReadOnly } from "../../config/sessions/session-accessor.js";
+import { retainPreparedSessionSharingFacts } from "../../config/sessions/session-accessor.sqlite-entry-cache-publication-state.js";
+import { projectSessionSharingEntry } from "../../config/sessions/session-accessor.sqlite-entry-cache.types.js";
 import { captureSessionEntryCurrentRead } from "../../config/sessions/session-entry-current-runtime.js";
 import type { SessionEntryCurrentFacts } from "../../config/sessions/session-entry-current.types.js";
 import { withSessionEntryReadOnlyInWorker } from "../../config/sessions/session-entry-read-runtime.js";
 import { captureSessionEntryMetadataRead } from "../../config/sessions/session-entry-source-authority.js";
 import { resolveSessionStorePathForScope } from "../../config/sessions/session-store-path.js";
+import { registerOpenClawAgentDatabaseAsyncResource } from "../../state/openclaw-agent-db-resources.js";
+import { assertRepositoryWorkspaceDiskIdentity } from "../../state/session-repository-workspaces.authority.js";
 import {
   placementTurnOwner,
   type WorkerSessionPlacementIdentity,
@@ -48,7 +51,7 @@ export function createRepositoryWorkspaceMutationService(options: {
         sessionId: params.sessionId,
         storePath: resolveSessionStorePathForScope(params),
       };
-      const source = captureSessionEntryMetadataRead(scope);
+      const source = captureSessionEntryMetadataRead(scope, params.assertCurrent);
       const assertCallerCurrent = () => {
         source?.assertCurrent();
         params.assertCurrent();
@@ -59,6 +62,22 @@ export function createRepositoryWorkspaceMutationService(options: {
         throw new Error("Repository workspace editing requires an active cloud placement");
       }
       return await options.workspaceOperations.run(placement.environmentId, async () => {
+        let facts: ReturnType<typeof retainPreparedSessionSharingFacts> | undefined;
+        let active = true;
+        let unregister = () => {};
+        const release = () => {
+          active = false;
+          facts?.release();
+          unregister();
+        };
+        using retained = {
+          [Symbol.dispose]: release,
+          assertCurrent() {
+            if (!active) {
+              throw new Error("Repository workspace session source is unavailable");
+            }
+          },
+        };
         assertCallerCurrent();
         const workspace = await options.resolveWorkspace(params);
         if (workspace.kind !== "repository") {
@@ -87,11 +106,38 @@ export function createRepositoryWorkspaceMutationService(options: {
               throw toErrorObject(read.error, "Repository workspace session read failed");
             }
             assertEntryCurrent(read.value);
+            if (owner.kind === "file") {
+              if (!facts) {
+                throw new Error("Repository workspace session source is unavailable");
+              }
+              facts.initialize({
+                entry: read.value && projectSessionSharingEntry(read.value),
+                membership: new Set(),
+              });
+            }
             return captureSessionEntryCurrentRead(scope, owner);
+          },
+          (database, identity) => {
+            facts = retainPreparedSessionSharingFacts({
+              databaseIdentity: identity.key,
+              sessionKey: scope.sessionKey,
+              acquiring: true,
+            });
+            unregister = registerOpenClawAgentDatabaseAsyncResource({
+              ...database,
+              revoke: release,
+              close: async () => release(),
+            });
           },
         );
         const assertPlacementCurrent = (current: WorkerSessionPlacementRecord | undefined) => {
           const currentEnvironment = environments.get(placement.environmentId);
+          if (workspace.repository.diskAuthority) {
+            assertRepositoryWorkspaceDiskIdentity(
+              workspace.repository.diskAuthority,
+              currentEnvironment,
+            );
+          }
           if (
             current?.state !== "active" ||
             current.agentId !== params.agentId ||
@@ -109,10 +155,10 @@ export function createRepositoryWorkspaceMutationService(options: {
         const assertWorkerCurrent = () => {
           assertCallerCurrent();
           currentEntry.assertSourceCurrent();
-          // Native entries have a commit projection; FILE rows come from the worker's grant.
-          if (currentEntry.kind !== "file") {
-            assertEntryCurrent(currentEntry.readCurrent());
-          }
+          retained.assertCurrent();
+          assertEntryCurrent(
+            currentEntry.kind === "file" ? facts?.readCurrent()?.entry : currentEntry.readCurrent(),
+          );
         };
         const currentCheck: PlacementTurnClaimCurrentCheck = {
           ...(currentEntry.kind === "file"
@@ -122,9 +168,6 @@ export function createRepositoryWorkspaceMutationService(options: {
         };
         const assertOwner = () => {
           assertWorkerCurrent();
-          if (currentEntry.kind !== "incognito") {
-            assertEntryCurrent(loadSessionEntryReadOnly(scope));
-          }
           assertPlacementCurrent(placements.get(params.sessionId));
         };
         assertOwner();
@@ -149,7 +192,8 @@ export function createRepositoryWorkspaceMutationService(options: {
           assertCurrent();
           const result = await params.mutate(assertCurrent);
           assertCurrent();
-          if (!result.changed) {
+          // The retained disk owns editor bytes; only explicit publication/export captures them.
+          if (!result.changed || workspace.repository.diskAuthority) {
             await placements.acceptWorkspaceResult(claim, assertWorkerCurrent, currentCheck);
             await placements.completeWorkspaceResultAndReleaseTurn(
               claim,
@@ -189,11 +233,11 @@ export function createRepositoryWorkspaceMutationService(options: {
                 journal: journal.adapter,
                 stagedResult: {
                   ref: stagedResultRef,
-                  record: (ref) =>
+                  record: (ref, workspaceId) =>
                     placements.recordStagedWorkspaceResult(
                       claim,
                       ref,
-                      workspace.repository.workspaceId,
+                      workspaceId,
                       assertWorkerCurrent,
                       currentCheck,
                     ),
