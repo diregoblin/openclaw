@@ -299,9 +299,6 @@ it.each([
     page.cron.cronCreateOpen = true;
     page.patchForm(announce);
     await waitForCronPage(() => expect(directoryCalls).toBe(2));
-    await page.updateComplete;
-    const trigger = page.querySelector<HTMLButtonElement>(".cron-job-menu__trigger")!;
-    trigger.focus();
 
     save.resolve({ id: "saved-1" });
     if (rotation === "scope") {

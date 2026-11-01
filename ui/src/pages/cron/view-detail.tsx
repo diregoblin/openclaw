@@ -1,4 +1,4 @@
-import { createMemo, Show } from "solid-js";
+import { createMemo, onSettled, Show } from "solid-js";
 import type { CronJob } from "../../api/types.ts";
 import { HubTabs } from "../../components/solid/hub-tabs.tsx";
 import { Icon } from "../../components/solid/icon.tsx";
@@ -21,6 +21,8 @@ export function DetailView(
     mode: CronPanelMode;
   },
 ) {
+  let back!: HTMLButtonElement;
+  onSettled(() => props.focus?.mount("back", back));
   // Status refresh updates the selected job's runtime facts in place.
   const selectedJob = createMemo(
     () => (props.mode === "job" ? (props.editingJob ?? undefined) : undefined),
@@ -43,6 +45,7 @@ export function DetailView(
       <SettingsPage wide>
         <div class="cron-back-row">
           <button
+            ref={(element) => (back = element)}
             type="button"
             class="cron-back"
             data-test-id="cron-back"
